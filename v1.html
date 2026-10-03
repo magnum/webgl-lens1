@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DOM lens (aiu.is technique, minimal)</title>
+<style>
+  body { margin: 0; padding: 8vh 10vw; background: #e9e9ea; color: #1010f0;
+         font: 600 28px/1.35 system-ui, sans-serif; }
+  h1 { font-size: 64px; margin: 0 0 .4em; }
+  /* 1. The real DOM stays (accessible, selectable, laid out by CSS)... */
+  .gl { opacity: 0; }                 /* ...but is invisible */
+  /* 2. A fixed full-screen canvas BEHIND the DOM draws the pixels */
+  #gl { position: fixed; inset: 0; width: 100vw; height: 100vh;
+        z-index: -1; pointer-events: none; }
+</style>
+</head>
+<body>
+  <h1 class="gl">Foreword</h1>
+  <p class="gl">Buttons and forms assumed a system that was fast, deterministic,
+  and silent about its own uncertainty. A model-backed interface can be none of
+  those things.</p>
+  <canvas id="gl" aria-hidden="true"></canvas>
+<script>
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl2');
+const page = document.createElement('canvas');      // offscreen "frame"
+const ctx = page.getContext('2d');
+const dpr = Math.min(devicePixelRatio, 2);
+
+// --- 3. Re-draw the DOM text into the offscreen canvas at its real position
+function paintDom() {
+  canvas.width = page.width = innerWidth * dpr;
+  canvas.height = page.height = innerHeight * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = getComputedStyle(document.body).backgroundColor;
+  ctx.fillRect(0, 0, innerWidth, innerHeight);
+  for (const el of document.querySelectorAll('.gl')) {
+    const s = getComputedStyle(el);
+    ctx.font = `${s.fontWeight} ${s.fontSize} ${s.fontFamily}`;
+    ctx.fillStyle = s.color; ctx.textBaseline = 'middle';
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const range = document.createRange();
+    for (let n; (n = walker.nextNode());) {
+      const re = /[^\s-]+-?/g; let m;
+      while ((m = re.exec(n.data))) {             // one rect per word (split after hyphens so wrapped words stay single-line)
+        range.setStart(n, m.index); range.setEnd(n, m.index + m[0].length);
+        const r = range.getBoundingClientRect();
+        ctx.fillText(m[0], r.left, r.top + r.height / 2);
+      }
+    }
+  }
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, page);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+
+// --- 4. Post-process: full-screen triangle + lens fragment shader
+const vs = `#version 300 es
+in vec2 p; out vec2 uv;
+void main(){ uv = p*.5+.5; gl_Position = vec4(p,0.,1.); }`;
+const fs = `#version 300 es
+precision highp float;
+in vec2 uv; out vec4 o;
+uniform sampler2D tex; uniform vec2 mouse; uniform float aspect, radius, strength;
+void main(){
+  vec2 a = vec2(aspect, 1.);
+  float d = length((uv - mouse) * a) / radius;
+  float w = exp(-d*d) * strength;           // gaussian bubble
+  vec2 src = mix(uv, mouse, w);             // sample closer to the centre = magnify
+  o = texture(tex, src);
+}`;
+function sh(t, s){ const x = gl.createShader(t); gl.shaderSource(x, s); gl.compileShader(x); return x; }
+const prog = gl.createProgram();
+gl.attachShader(prog, sh(gl.VERTEX_SHADER, vs));
+gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
+gl.linkProgram(prog); gl.useProgram(prog);
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+const U = n => gl.getUniformLocation(prog, n);
+
+// --- 5. Mouse -> uniforms, with easing (like aiu.is: x += (target-x)*(1-e^-9dt))
+let tx = .5, ty = .5, x = .5, y = .5, k = 0, tk = 0, last = performance.now();
+addEventListener('pointermove', e => { tx = e.clientX/innerWidth; ty = 1 - e.clientY/innerHeight; tk = .35; }, { passive: true });
+document.addEventListener('pointerleave', () => tk = 0);
+addEventListener('resize', paintDom);
+addEventListener('scroll', paintDom, { passive: true });
+document.fonts.ready.then(paintDom);
+(function frame(now){
+  const dt = Math.min((now - last) / 1000, .1); last = now;
+  const e = 1 - Math.exp(-9 * dt);
+  x += (tx - x) * e; y += (ty - y) * e; k += (tk - k) * e;
+  gl.uniform2f(U('mouse'), x, y);
+  gl.uniform1f(U('aspect'), innerWidth / innerHeight);
+  gl.uniform1f(U('radius'), 120 / innerHeight);
+  gl.uniform1f(U('strength'), k);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(frame);
+})(last);
+</script>
+</body>
+</html>
